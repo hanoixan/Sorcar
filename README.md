@@ -64,7 +64,7 @@ and more...!
 | | |
 | ![sc_noise](https://github.com/aachman98/sc-img-data/raw/master/sc_noise.png "Noise") | **Noise** </br> Cell (Vector/Float), Fractal, Multi-Fractal, Hetero-Terrain, Ridged, Turbulence (Vector/Float), Variable Lacunarity, Voronoi |
 | | |
-| ![sc_utilities](https://github.com/aachman98/sc-img-data/raw/master/sc_utilities.png "Utilities") | **Utilities** </br> String/Bool/Vector ops, Maths, Clamp, Map, Trigonometry, Get/Set Variables, Node-Groups, Scene/Component/Object Info, Custom Python Script |
+| ![sc_utilities](https://github.com/aachman98/sc-img-data/raw/master/sc_utilities.png "Utilities") | **Utilities** </br> String/Bool/Vector ops, Maths, Clamp, Map, Trigonometry, Get/Set Variables, Node-Groups, Scene/Component/Object Info, Weighted Index, Custom Python Script |
 | ![sc_flow_control](https://github.com/aachman98/sc-img-data/raw/master/sc_flow_control.png "Flow Control") | **Flow Control** </br> For loop, For-Each loop (Array/Components), If-Else Branch, Switch |
 | ![sc_settings](https://github.com/aachman98/sc-img-data/raw/master/sc_settings.png "Settings") | **Settings** </br> Cursor Transform, Edit Mode, Pivot Point, Snapping, Proportional Editing, Transform Orientation |
 

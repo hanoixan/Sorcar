@@ -52,6 +52,19 @@ class ScNode:
     def set_scope_context(self, context):
         self.scope_contexts[hash(self)] = context
 
+    def get_scope_context_id(self):
+        self_hash = hash(self)
+        if self_hash in self.scope_contexts:
+            context = self.scope_contexts[self_hash]
+            return context['id']
+        return -1
+
+    def restore_scope_context_id(self, id):
+        self_hash = hash(self)
+        if self_hash in self.scope_contexts:
+            context = self.scope_contexts[self_hash]
+            context['id'] = id
+        
     def increment_scope_context_id(self):
         self_hash = hash(self)
         if self_hash in self.scope_contexts:

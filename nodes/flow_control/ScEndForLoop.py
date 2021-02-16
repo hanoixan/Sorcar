@@ -31,10 +31,12 @@ class ScEndForLoop(Node, ScNode):
         )
     
     def functionality(self):
+        context_id = self.get_scope_context_id()        
         for i in range (0, int(self.inputs["Iterations"].default_value)):
+            self.increment_scope_context_id()
             self.inputs["Begin For Loop"].links[0].from_node.out_counter += 1
             self.inputs["In"].execute(self.get_scope_context(), False)
-            self.increment_scope_context_id()
+        self.restore_scope_context_id(context_id)
         self.inputs["Begin For Loop"].links[0].from_node.prop_locked = False
     
     def post_execute(self):

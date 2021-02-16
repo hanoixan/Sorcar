@@ -24,7 +24,9 @@ class ScEndForEachComponentLoop(Node, ScNode):
         )
     
     def functionality(self):        
+        context_id = self.get_scope_context_id()        
         for i in eval(self.inputs["Begin For-Each Component Loop"].links[0].from_node.prop_components):
+            self.increment_scope_context_id()
             self.inputs["Begin For-Each Component Loop"].links[0].from_node.out_index = i
             bpy.ops.object.mode_set(mode="EDIT")
             bpy.ops.mesh.select_all(action="DESELECT")
@@ -37,7 +39,7 @@ class ScEndForEachComponentLoop(Node, ScNode):
                 self.inputs["Begin For-Each Component Loop"].links[0].from_node.outputs["Out"].default_value.data.polygons[i].select = True
             bpy.ops.object.mode_set(mode="EDIT")
             self.inputs["In"].execute(self.get_scope_context(), False)
-            self.increment_scope_context_id()
+        self.restore_scope_context_id(context_id)
         self.inputs["Begin For-Each Component Loop"].links[0].from_node.prop_locked = False
     
     def post_execute(self):
