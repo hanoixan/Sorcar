@@ -1,10 +1,11 @@
 import sys
 import bpy
 import numpy
+import inspect
 from numpy import array, uint32
 import re
 
-from mathutils import Vector, Matrix
+from mathutils import Vector, Matrix, Euler
 from bpy.props import PointerProperty, StringProperty, EnumProperty, BoolProperty, IntProperty
 from bpy.types import Node
 from .._base.node_base import ScNode
@@ -43,6 +44,13 @@ class DslContext:
         # the last link moved to
         self.cur_link = start_link
 
+        # the current transform in the current link's frame of reference
+        # every link that's followed resets this
+        self.cur_link_matrix = start_link.matrix_world.copy()
+        self.cur_location = Vector((0,0,0))
+        self.cur_rotation = Euler((0,0,0), 'XYZ')
+        self.cur_scale = Vector((1,1,1))
+
         # definitions at our disposal to search for
         self.definitions = {}
         # while defining, we can capture all exports for use in that definition during execution
@@ -65,6 +73,31 @@ class DslContext:
     def add_generated_object(self, obj):
         self.generated_objects.append(obj)
 
+    def _reset_transform(self):
+        self.cur_location = Vector((0,0,0))
+        self.cur_rotation = Euler((0,0,0), 'XYZ')
+        self.cur_scale = Vector((1,1,1))
+
+    def compute_world_matrix(self):
+        mat_loc = Matrix.Translation(self.cur_location).to_4x4()
+        mat_rot = Euler(self.cur_rotation, 'XYZ').to_matrix().to_4x4()
+        mat_sca = Matrix.Diagonal(self.cur_scale).to_4x4()
+        mat = mat_loc @ mat_rot @ mat_sca
+        return self.cur_link_matrix @ mat
+
+    # parent object to a parent, and select object after
+    def parent_object(self, obj, parent):
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        parent.select_set(True)
+        bpy.context.view_layer.objects.active = parent
+
+        bpy.ops.object.parent_set(type="OBJECT", keep_transform=False)
+
+        bpy.ops.object.select_all(action="DESELECT")
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+
     def set_current_object(self, obj):
         self.cur_obj = obj
         self.cur_obj_aliases = None
@@ -73,8 +106,10 @@ class DslContext:
 
     def set_current_link(self, link):
         self.cur_link = link
+        self.cur_link_matrix = link.matrix_world.copy()
         self.cur_obj = None
         self.cur_obj_aliases = None
+        self._reset_transform()
         self.print_state("set_current_link")
 
     def get_current_link(self):
@@ -117,6 +152,16 @@ class DslContext:
 
         self.print_state("move_to_link(not found)")
 
+    def create_link(self, name):
+        if self.cur_obj == None:
+            self.add_error("Warning: Ignored creating a link without an active object.")
+        else:
+            mat = self.compute_world_matrix()
+            loc, rot, sca = mat.decompose()
+            bpy.ops.object.empty_add(type='ARROWS', align='WORLD', location=loc, rotation=rot, scale=sca)
+            obj = bpy.context.view_layer.objects.active
+            self.parent_object(obj, self.cur_obj)
+
     def set_definition(self, name, sequence):
         self.definitions[name] = sequence
 
@@ -129,7 +174,11 @@ class DslContext:
         self.scopes.append({
             'cur_obj': self.cur_obj,
             'cur_obj_aliases': self.cur_obj_aliases,
-            'cur_link': self.cur_link
+            'cur_link': self.cur_link,
+            'cur_link_matrix': self.cur_link_matrix.copy(),
+            'cur_location' : self.cur_location.copy(),
+            'cur_rotation' : self.cur_rotation.copy(),
+            'cur_scale' : self.cur_scale.copy()
         })
         self.print_state("push_scope")
 
@@ -144,6 +193,10 @@ class DslContext:
         self.cur_obj = top['cur_obj']
         self.cur_obj_aliases = top['cur_obj_aliases']
         self.cur_link = top['cur_link']
+        self.cur_link_matrix = top['cur_link_matrix'].copy()
+        self.cur_location = top['cur_location'].copy()
+        self.cur_rotation = top['cur_rotation'].copy()
+        self.cur_scale = top['cur_scale'].copy()
         self.print_state("pop_scope")
         
     def push_define_export_capture(self):
@@ -182,7 +235,18 @@ class DslContext:
     def clear_errors(self):
         self.errors = []
 
-class DslValue:
+class DslBase:
+    def register(self):
+        trace = inspect.stack()
+        if trace != None:
+            self.script_line = trace[2][2]
+        else:
+            self.script_line = -1
+
+    def get_script_line(self):
+        return self.script_line
+
+class DslValue(DslBase):
     def __init__(self):
         pass
 
@@ -194,6 +258,7 @@ class DslValue:
 
 class GnRange(DslValue):
     def __init__(self, min_value, max_value):
+        self.register()
         self.min_value = min_value
         self.max_value = max_value
 
@@ -216,6 +281,7 @@ class GnRange(DslValue):
 # on evaluation, will use ctx random state to pick a value
 class GnWeighted(DslValue):
     def __init__(self, weights):
+        self.register()
         self.weights = weights
 
     def prepare(self, ctx):
@@ -254,6 +320,7 @@ class GnWeighted(DslValue):
 # Caches the result for use during the evaluate() call
 class GnStatic(DslValue):
     def __init__(self, value):
+        self.register()
         self.value = value
 
     def prepare(self, ctx):
@@ -268,12 +335,28 @@ class GnStatic(DslValue):
 
 # An operation in the DSL
 # Contains helper methods
-class DslOp:
+class DslOp(DslBase):
     def __init__(self):
         pass
 
     def prepare(self, ctx):
         return True
+
+    def assert_link_op(self, ctx):
+        if ctx.cur_link != None:
+            return True
+        name = type(self).__name__
+        line = self.get_script_line()
+        ctx.add_error("%s (line %d): Error: Expected to be in an operation under a direct link." % (name, line))
+        return False
+
+    def assert_instance_op(self, ctx):
+        if ctx.cur_obj != None or ctx.cur_obj_aliases != None:
+            return True
+        name = type(self).__name__
+        line = self.get_script_line()
+        ctx.add_error("%s (line %d): Error: Expected to be in an operation under a direct geometry instance." % (name, line))
+        return False
 
     def prepare_value(self, ctx, value):
         if isinstance(value, DslValue):
@@ -313,18 +396,13 @@ class DslOp:
         self.move_hierarchy_collections(obj, obj_collection, parent_collection)
         
         # final parenting within collection
-        bpy.ops.object.select_all(action="DESELECT")
-        obj.select_set(True)
-        parent.select_set(True)
-        bpy.context.view_layer.objects.active = parent
-
-        bpy.ops.object.parent_set(type="OBJECT", keep_transform=False)
-        bpy.context.view_layer.objects.active = obj
+        ctx.parent_object(obj, parent)
 
 # Define a named macro that can be executed as needed
 # Definitions require explicit GnExportLink after the GnLink is made
 class GnDefine(DslOp):
     def __init__(self, name, sequence):
+        self.register()
         self.name = name
         self.sequence = sequence
 
@@ -350,12 +428,16 @@ class GnDefine(DslOp):
 # A definition of the exported links in a command definition above
 class GnExportLink(DslOp):
     def __init__(self, alias):
+        self.register()
         self.alias = alias
 
     def prepare(self, ctx):
         return self.prepare_value(ctx, self.alias)
 
     def execute(self, ctx):
+        if not self.assert_link_op(ctx):
+            return
+
         alias = self.evaluate_value(ctx, self.alias)
         ctx.define_link_export(alias)
 
@@ -363,6 +445,7 @@ class GnExportLink(DslOp):
 # to where they were before the scope.
 class GnScope(DslOp):
     def __init__(self, sequence):
+        self.register()
         self.sequence = sequence
 
     def prepare(self, ctx):
@@ -386,6 +469,7 @@ class GnScope(DslOp):
 # Count can be any DslValue instance or integer constant
 class GnRepeat(DslOp):
     def __init__(self, count, sequence):
+        self.register()
         self.count = count
         self.sequence = sequence        
 
@@ -407,12 +491,16 @@ class GnRepeat(DslOp):
 # by looking for an identically named collection, and copying a weighted template object it
 class GnInstance(DslOp):
     def __init__(self, name):
+        self.register()
         self.name = name
 
     def prepare(self, ctx):
         return self.prepare_value(ctx, self.name)
 
     def execute(self, ctx):
+        if not self.assert_link_op(ctx):
+            return
+
         name = self.evaluate_value(ctx, self.name)
         sequence = ctx.get_definition(name)
         if sequence != None:
@@ -461,7 +549,7 @@ class GnInstance(DslOp):
 
                 copy = bpy.context.view_layer.objects.active
                 if copy != None:
-                    copy.matrix_world = ctx.get_current_link().matrix_world.copy()
+                    copy.matrix_world = ctx.compute_world_matrix()
 
                     # move to parent's collection
                     self.move_hierarchy_to_link(ctx, copy)
@@ -471,6 +559,7 @@ class GnInstance(DslOp):
 
 class GnCopyParentLinkChildren(DslOp):
     def __init__(self, link, mirror=None):
+        self.register()
         self.link = link
         self.mirror = mirror
 
@@ -478,6 +567,9 @@ class GnCopyParentLinkChildren(DslOp):
         return self.prepare_value(ctx, self.link)
 
     def execute(self, ctx):
+        if not self.assert_link_op(ctx):
+            return
+
         src_link_name = self.evaluate_value(ctx, self.link)
         dest_link = ctx.get_current_link()
         if dest_link != None:
@@ -496,24 +588,19 @@ class GnCopyParentLinkChildren(DslOp):
 
                             gch_copy = bpy.context.view_layer.objects.active
                             if gch_copy != None:
-                                gch_copy.matrix_world = dest_link.matrix_world.copy()
+                                gch_copy.matrix_world = ctx.compute_world_matrix()
 
                                 # move to parent's collection
                                 self.move_hierarchy_to_link(ctx, gch_copy, dest_link)
 
-                                mirror_tuple = None
                                 scale_tuple = None
                                 if self.mirror == 'x':
-                                    mirror_tuple = (True, False, False)
                                     scale_tuple = (1, 0, 0)
                                 elif self.mirror == 'y':
-                                    mirror_tuple = (False, True, False)
                                     scale_tuple = (0, 1, 0)
                                 elif self.mirror == 'z':
-                                    mirror_tuple = (False, False, True)
                                     scale_tuple = (0, 0, 1)
 
-                                #if mirror_tuple != None:
                                 if scale_tuple != None:
                                     bpy.ops.object.select_all(action="DESELECT")
                                     gch_copy.select_set(True)
@@ -531,12 +618,30 @@ class GnCopyParentLinkChildren(DslOp):
 
                                 ctx.add_generated_object(gch_copy)
 
+# Create a link dynamically at the current position, but do not follow it.
+# In any entered link, the position is by default 0,0,0. A position can be set by GnMove.
+class GnCreateLink(DslOp):
+    def __init__(self, name):
+        self.register()
+        self.name = name
+
+    def prepare(self, ctx):
+        return self.prepare_value(ctx, self.name)
+
+    def execute(self, ctx):
+        if not self.assert_instance_op(ctx):
+            return
+
+        name = self.evaluate_value(ctx, self.name)
+        ctx.create_link(name)
+
 # In the state machine, move from the last made object to a named link
 # If the last named object was a dictionary defined macro, it will search the current exports.
 # otherwise, it will look for children with a <prefix>_link custom property where the value 
 # matches the link name.
 class GnLink(DslOp):
     def __init__(self, name):
+        self.register()
         self.name = name
 
     def prepare(self, ctx):
@@ -546,12 +651,10 @@ class GnLink(DslOp):
         name = self.evaluate_value(ctx, self.name)
         ctx.move_to_link(name)
 
-# In the state machine, move from the last made object to a named link
-# If the last named object was a dictionary defined macro, it will search the current exports.
-# otherwise, it will look for children with a <prefix>_link custom property where the value 
-# matches the link name.
+# Search for a link based on a pattern, and run the sequence on each one.
 class GnEachLink(DslOp):
     def __init__(self, pattern, sequence):
+        self.register()
         self.pattern = pattern
         self.sequence = sequence
 
@@ -568,6 +671,9 @@ class GnEachLink(DslOp):
         return True
 
     def execute(self, ctx):                
+        if not self.assert_instance_op(ctx):
+            return
+
         links = ctx.get_matching_links(self.pattern)
         for link in links:
             ctx.push_scope()
@@ -575,6 +681,102 @@ class GnEachLink(DslOp):
             for item in self.sequence:
                 item.execute(ctx)
             ctx.pop_scope()
+
+# In the state machine, move from the last made object to a named link
+# If the last named object was a dictionary defined macro, it will search the current exports.
+# otherwise, it will look for children with a <prefix>_link custom property where the value 
+# matches the link name.
+class GnMaybe(DslOp):
+    def __init__(self, ratio, sequence):
+        self.register()
+        self.ratio = ratio
+        self.sequence = sequence
+
+    def prepare(self, ctx):
+        if not self.prepare_value(ctx, self.ratio):
+            ctx.add_error("GnMaybe: ratio is invalid.")
+            return False
+        if not isinstance(self.sequence, list) and not isinstance(self.sequence, tuple):
+            ctx.add_error("GnMaybe: scope sequence must be of type list or tuple")
+            return False
+        for item in self.sequence:
+            if not item.prepare(ctx):
+                return False
+        return True
+
+    def execute(self, ctx):
+        if ctx.rand_state.rand() <= self.ratio:
+            for item in self.sequence:
+                item.execute(ctx)
+
+class GnMove(DslOp):
+    def __init__(self, location, absolute=False):
+        self.register()
+        self.location = location
+        self.absolute = absolute
+
+    def prepare(self, ctx):
+        if type(self.absolute) != type(True):
+            ctx.add_error("GnMove: absolute key must be True or False.")
+            return False
+        if not isinstance(self.location, list) and not isinstance(self.location, tuple):
+            ctx.add_error("GnMove: location must be of type list or tuple")
+            return False
+        return True
+
+    def execute(self, ctx):
+        if self.absolute:
+            ctx.cur_location = Vector(self.location)
+        else:
+            ctx.cur_location += Vector(self.location)
+
+class GnRotate(DslOp):
+    def __init__(self, rotation, absolute=False):
+        self.register()
+        self.rotation = rotation
+        self.absolute = absolute
+
+    def prepare(self, ctx):
+        if type(self.absolute) != type(True):
+            ctx.add_error("GnRotate: absolute key must be True or False.")
+            return False
+        if not isinstance(self.rotation, list) and not isinstance(self.rotation, tuple):
+            ctx.add_error("GnRotate: rotation must be an Euler XYZ representation of type list or tuple")
+            return False
+        return True
+
+    def execute(self, ctx):
+        if self.absolute:
+            ctx.cur_rotation = Euler(self.rotation, 'XYZ')
+        else:
+            ctx.cur_rotation.rotate(Euler(self.rotation, 'XYZ'))
+
+class GnScale(DslOp):
+    def __init__(self, scale, absolute=False):
+        self.register()
+        self.scale = scale
+        self.absolute = absolute
+
+    def prepare(self, ctx):
+        if type(self.absolute) != type(True):
+            ctx.add_error("GnScale: absolute key must be True or False.")
+            return False
+        if not isinstance(self.scale, list) and not isinstance(self.scale, tuple):
+            ctx.add_error("GnScale: scale must be of type list or tuple")
+            return False
+        return True
+
+    def execute(self, ctx):
+        if self.absolute:
+            ctx.cur_scale = Vector(self.scale)
+        else:
+            print_log("Scale Pre", "ctx.cur_scale:%s self.scale:%s" % (repr(ctx.cur_scale), repr(self.scale)))
+
+            ctx.cur_scale = Vector((
+                ctx.cur_scale[0] * self.scale[0],
+                ctx.cur_scale[1] * self.scale[1],
+                ctx.cur_scale[2] * self.scale[2]
+            ))
 
 # Generator node
 
@@ -646,7 +848,6 @@ class ScGenerate(Node, ScObjectOperatorNode):
 
                 # root of rule recursion
                 dsl_ctx = DslContext(rs, self.inputs["Prefix"].default_value, start_obj)
-
                 op_list = eval(file_text)
                 for op in op_list:
                     op.prepare(dsl_ctx)
@@ -655,6 +856,7 @@ class ScGenerate(Node, ScObjectOperatorNode):
                         break
 
                     op.execute(dsl_ctx)
+
                     if dsl_ctx.check_for_errors("Execution"):
                         break
 
