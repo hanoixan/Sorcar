@@ -12,10 +12,17 @@ from .._base.node_base import ScNode
 from .._base.node_operator import ScObjectOperatorNode
 from ...helper import focus_on_object, remove_object, print_log
 
-DEBUG_PRINT = False
+DEBUG_PRINT = True
 
 PROP_WEIGHT_KEY = "weight"
 PROP_LINK_KEY = "link"
+PROP_INSTANCER_KEY = "instancer"
+
+# TODO:
+# * Allow gen_instancer to accept collections/definitions, or evaluable code if it contains a ( or ).
+# * Create a simple 2D layout system using bounding boxes and filling them with scaled instances, which flows in X, and then Y.
+# * Tag object to recursively combine and bake all child meshes and modifiers
+# 
 
 # Debug util
 
@@ -40,6 +47,7 @@ class DslContext:
         self.cur_obj = None
         # definitions must set aliases. if cur_obj_aliases != None, the cur_obj's children will
         # be ignored for following links, and we'll only use the aliases.
+        # instance nodes will be followed.
         self.cur_obj_aliases = None
         # the last link moved to
         self.cur_link = start_link
@@ -69,6 +77,32 @@ class DslContext:
     def print_state(self, title):
         if DEBUG_PRINT:
             debug_log("print_state", "%s: obj:%s obj_aliases:%s link:%s" % (title, repr(self.cur_obj), repr(self.cur_obj_aliases), repr(self.cur_link)))
+
+    def is_production_list(self, text):
+        return re.match(r"^\s*\[.*\]\s*$", text, flags=re.MULTILINE|re.DOTALL) != None
+
+    def evaluate_production(self, text):
+        try:
+            if not self.is_production_list(text):
+                self.add_error("Rule production is not a list: %s" % (text,))
+                self.check_for_errors("Parse")
+                return False
+
+            op_list = eval(text)
+
+            for op in op_list:
+                op.prepare(self)
+                if self.check_for_errors("Preparation"):
+                    return False
+                op.execute(self)
+                if self.check_for_errors("Execution"):
+                    return False
+        except:
+            self.add_error("Exception while evaluating rule production: %s" % str(sys.exc_info()[0]))
+            self.check_for_errors("Parse")
+            return False
+
+        return True
 
     def add_generated_object(self, obj):
         self.generated_objects.append(obj)
@@ -121,35 +155,71 @@ class DslContext:
             return obj[key]
         return None
 
-    def get_matching_links(self, pattern):
-        links = []
-        if self.cur_obj_aliases:
-            for alias in self.cur_obj_aliases.keys():
-                if re.match(pattern, alias):
-                    links.append(self.cur_obj_aliases[alias])
+    def get_link_parent(self, link):
+        parent = link.parent
+        while parent:
+            next_parent = parent.parent
+            if not next_parent or self.get_custom_property_value(next_parent, PROP_LINK_KEY) or self.get_custom_property_value(next_parent, PROP_INSTANCER_KEY):
+                return parent
+            parent = next_parent
+        return None
+
+    def _get_links_recursive(self, link_list, node, re_comp):
+        for child in node.children:
+            child_link_name = self.get_custom_property_value(child, PROP_LINK_KEY)
+            if child_link_name != None:
+                if re_comp.match(child_link_name):
+                    link_list.append( (child_link_name, child) )
+            else:
+                self._get_links_recursive(link_list, child, re_comp)
+
+    def get_matching_links(self, pattern, node=None):
+        link_list = []
+
+        print_log("Debug0", "Pattern:%s Aliases:%s Obj:%s" % (pattern, repr(self.cur_obj_aliases), repr(self.cur_obj)))
+
+        re_comp = re.compile(pattern)
+        if node != None:
+            self._get_links_recursive(link_list, node, re_comp)
+        elif self.cur_obj_aliases:
+            for name in self.cur_obj_aliases:
+                if re_comp.match(name) != None:
+                    link_list.append( (name, self.cur_obj_aliases[name]) )
         elif self.cur_obj:
-            for child in self.cur_obj.children:
-                child_link_name = self.get_custom_property_value(child, PROP_LINK_KEY)
-                if re.match(pattern, child_link_name):
-                    links.append(child)
-        return links
+            self._get_links_recursive(link_list, self.cur_obj, re_comp)
+
+        print_log("Debug1", "List:%s" % (repr(link_list),))
+
+        return link_list
+
+    def _get_leaf_instancers_recursive(self, node, leaves):
+        instancer_string = self.get_custom_property_value(node, PROP_INSTANCER_KEY)
+        if instancer_string != None and len(node.children) == 0:
+            # leaf
+            leaves.append( (instancer_string, node) )
+        else:
+            for child in node.children:
+                self._get_leaf_instancers_recursive(child, leaves)
+
+    def get_leaf_instancers(self):
+        if self.cur_obj != None:
+            leaves = []
+            self._get_leaf_instancers_recursive(self.cur_obj, leaves)
+            return leaves
+        return None
+
+    def get_child_links(self):
+        return self.get_matching_links(".*")
 
     def move_to_link(self, name):
-        # if aliases defined, don't look at children
-        if self.cur_obj_aliases:
-            # if alias not found, do not default to children--it just wasn't defined.
-            if name in self.cur_obj_aliases:
-                self.set_current_link(self.cur_obj_aliases[name])
-                self.print_state("move_to_link(alias)")
+        links = self.get_matching_links(name)
+        for pair in links:
+            link_name = pair[0]
+            link = pair[1]
+            if name == link_name:
+                self.set_current_link(link)
+                self.print_state("move_to_link")
                 return
-        elif self.cur_obj:
-            for child in self.cur_obj.children:
-                child_link_name = self.get_custom_property_value(child, PROP_LINK_KEY)
-                if child_link_name == name:
-                    self.set_current_link(child)
-                    self.print_state("move_to_link(child)")
-                    return
-
         self.print_state("move_to_link(not found)")
 
     def create_link(self, name):
@@ -202,6 +272,7 @@ class DslContext:
     def push_define_export_capture(self):
         self.print_state("push_define_export_capture")
         self.export_captures.append({
+            'object': None,
             'aliases': {}
         })
 
@@ -218,10 +289,134 @@ class DslContext:
 
     def pop_define_export_capture(self):
         top = self.export_captures.pop()
-        self.cur_obj = None
-        self.cur_obj_aliases = top['aliases']
-        self.cur_link = None
+        obj = top['object']
+        # If no object was instanced during capture, don't consider
+        # this a valid capture.
+        if obj != None:
+            self.cur_obj = obj
+            self.cur_obj_aliases = top['aliases']
+            self.cur_link = None
         self.print_state("pop_define_export_capture")
+
+    def move_hierarchy_collections(self, item, from_collection, to_collection):
+        if from_collection != None:
+            from_collection.objects.unlink(item)
+        if to_collection != None:
+            to_collection.objects.link(item)
+
+        for child in item.children:
+            self.move_hierarchy_collections(child, from_collection, to_collection)
+
+    def move_hierarchy_to_link(self, obj, link=None):
+        # move hierarchy to parent's collection
+        # first remove the object's link to current collection
+        obj_collection = None
+        if len(obj.users_collection) > 0:
+            obj_collection = obj.users_collection[0]        
+
+        parent = self.get_current_link()
+        if link != None:
+            parent = link
+
+        parent_collection = None
+        if len(parent.users_collection) > 0:
+            parent_collection = parent.users_collection[0]
+
+        self.move_hierarchy_collections(obj, obj_collection, parent_collection)
+        
+        # final parenting within collection
+        self.parent_object(obj, parent)
+
+    def notify_instance_created(self, obj):
+        cap = self._get_define_export_capture()
+        # track first object for an export capture--this 
+        # will be the cur_obj after capture.
+        if cap and (cap['object'] == None):
+            cap['object'] = obj
+
+    def create_instance(self, name):
+        # check if it's a bounding link
+        bbox = None
+        if self.cur_link and self.cur_link.type == 'EMPTY' and self.cur_link.empty_display_type == 'CUBE':
+            bbox = self.cur_link.empty.scale
+
+        sequence = self.get_definition(name)
+        if sequence != None:
+            self.push_define_export_capture()
+            for item in sequence:
+                if isinstance(item, DslOp):
+                    item.execute(self)
+            self.pop_define_export_capture()
+        elif name in bpy.data.collections:
+            selected_obj = None
+            src_collection = bpy.data.collections[name]
+            src_objects = []
+            if src_collection != None:                            
+                for ch in src_collection.objects:
+                    # check for top level
+                    if ch.parent == None:
+                        src_objects.append(ch)
+            weight_total = 0
+            weight_pairs = []
+            if len(src_objects) > 0:                
+                for candidate in src_objects:
+                    weight = self.get_custom_property_value(candidate, PROP_WEIGHT_KEY)
+                    if type(weight) not in [int, float]:
+                        weight = 1.0
+                    weight_total += weight
+                    weight_pairs.append((candidate, weight))
+                rand01 = self.rand_state.rand()
+                weight_thresh = rand01 * weight_total
+                weight_sum = 0
+
+                for pair in weight_pairs:
+                    weight_sum += pair[1]
+                    if weight_sum > weight_thresh:
+                        selected_obj = pair[0]
+                        break
+                
+                if selected_obj == None:                
+                    selected_obj = src_objects[len(src_objects) - 1]
+
+            if selected_obj != None:
+                # hierarchically duplicate object
+                bpy.ops.object.select_all(action="DESELECT")
+                selected_obj.select_set(True)
+                bpy.context.view_layer.objects.active = selected_obj
+                bpy.ops.object.select_grouped(extend=True, type='CHILDREN_RECURSIVE')
+                bpy.ops.object.duplicate()
+
+                copy = bpy.context.view_layer.objects.active
+                if copy != None:
+                    copy.matrix_world = self.compute_world_matrix()
+
+                    # move to parent's collection
+                    self.move_hierarchy_to_link(copy)
+
+                    self.set_current_object(copy)
+                    self.add_generated_object(copy)
+                    self.notify_instance_created(copy)
+        
+        instancers = self.get_leaf_instancers()
+        if instancers != None:
+            for inst in instancers:
+                # treat gen_instance as links that get automatically instanced
+                inst_string = inst[0]
+                inst_obj = inst[1]
+
+                if self.is_production_list(inst_string):
+                    # eval list
+                    self.push_scope()
+                    self.set_current_link(inst_obj)
+                    if not self.evaluate_production(inst_string):
+                        self.add_error("Could not evaluate instancer on object %s" % (inst_obj.name,))
+                    self.pop_scope()
+                else:
+                    # name
+                    self.push_scope()
+                    self.set_current_link(inst_obj)
+                    self.create_instance(inst_string)
+                    self.pop_scope()
 
     def add_error(self, error):
         self.errors.append(error)
@@ -351,7 +546,7 @@ class DslOp(DslBase):
         return False
 
     def assert_instance_op(self, ctx):
-        if ctx.cur_obj != None or ctx.cur_obj_aliases != None:
+        if ctx.cur_obj != None:
             return True
         name = type(self).__name__
         line = self.get_script_line()
@@ -368,35 +563,6 @@ class DslOp(DslBase):
         while isinstance(value, DslValue):
             value = value.evaluate(ctx)
         return value
-
-    def move_hierarchy_collections(self, item, from_collection, to_collection):
-        if from_collection != None:
-            from_collection.objects.unlink(item)
-        if to_collection != None:
-            to_collection.objects.link(item)
-
-        for child in item.children:
-            self.move_hierarchy_collections(child, from_collection, to_collection)
-
-    def move_hierarchy_to_link(self, ctx, obj, link=None):
-        # move hierarchy to parent's collection
-        # first remove the object's link to current collection
-        obj_collection = None
-        if len(obj.users_collection) > 0:
-            obj_collection = obj.users_collection[0]        
-
-        parent = ctx.get_current_link()
-        if link != None:
-            parent = link
-
-        parent_collection = None
-        if len(parent.users_collection) > 0:
-            parent_collection = parent.users_collection[0]
-
-        self.move_hierarchy_collections(obj, obj_collection, parent_collection)
-        
-        # final parenting within collection
-        ctx.parent_object(obj, parent)
 
 # Define a named macro that can be executed as needed
 # Definitions require explicit GnExportLink after the GnLink is made
@@ -502,60 +668,7 @@ class GnInstance(DslOp):
             return
 
         name = self.evaluate_value(ctx, self.name)
-        sequence = ctx.get_definition(name)
-        if sequence != None:
-            ctx.push_define_export_capture()
-            for item in sequence:
-                item.execute(ctx)
-            ctx.pop_define_export_capture()
-        elif name in bpy.data.collections:
-            selected_obj = None
-            src_collection = bpy.data.collections[name]
-            src_objects = []
-            if src_collection != None:                            
-                for ch in src_collection.objects:
-                    # check for top level
-                    if ch.parent == None:
-                        src_objects.append(ch)
-            weight_total = 0
-            weight_pairs = []
-            if len(src_objects) > 0:                
-                for candidate in src_objects:
-                    weight = ctx.get_custom_property_value(candidate, PROP_WEIGHT_KEY)
-                    if type(weight) not in [int, float]:
-                        weight = 1.0
-                    weight_total += weight
-                    weight_pairs.append((candidate, weight))
-                rand01 = ctx.rand_state.rand()
-                weight_thresh = rand01 * weight_total
-                weight_sum = 0
-
-                for pair in weight_pairs:
-                    weight_sum += pair[1]
-                    if weight_sum > weight_thresh:
-                        selected_obj = pair[0]
-                        break
-                
-                if selected_obj == None:                
-                    selected_obj = src_objects[len(src_objects) - 1]
-
-            if selected_obj != None:
-                # hierarchically duplicate object
-                bpy.ops.object.select_all(action="DESELECT")
-                selected_obj.select_set(True)
-                bpy.context.view_layer.objects.active = selected_obj
-                bpy.ops.object.select_grouped(extend=True, type='CHILDREN_RECURSIVE')
-                bpy.ops.object.duplicate()
-
-                copy = bpy.context.view_layer.objects.active
-                if copy != None:
-                    copy.matrix_world = ctx.compute_world_matrix()
-
-                    # move to parent's collection
-                    self.move_hierarchy_to_link(ctx, copy)
-
-                    ctx.set_current_object(copy)
-                    ctx.add_generated_object(copy)
+        ctx.create_instance(name)
 
 class GnCopyParentLinkChildren(DslOp):
     def __init__(self, link, mirror=None):
@@ -573,11 +686,15 @@ class GnCopyParentLinkChildren(DslOp):
         src_link_name = self.evaluate_value(ctx, self.link)
         dest_link = ctx.get_current_link()
         if dest_link != None:
-            parent = dest_link.parent
+            parent = ctx.get_link_parent(dest_link)
+
+            print_log("Debug2", "Parent: %s" % (repr(parent),))
+
             if parent != None:
-                for child in parent.children:
-                    child_link_name = ctx.get_custom_property_value(child, PROP_LINK_KEY)
-                    if child_link_name == src_link_name:
+                links = ctx.get_matching_links(src_link_name, node=parent)
+                if len(links) > 0:
+                    child = links[0][1] # get the first pair, link is index 1
+                    if child:
                         for gch in child.children:
                             # hierarchically duplicate all children
                             bpy.ops.object.select_all(action="DESELECT")
@@ -591,7 +708,7 @@ class GnCopyParentLinkChildren(DslOp):
                                 gch_copy.matrix_world = ctx.compute_world_matrix()
 
                                 # move to parent's collection
-                                self.move_hierarchy_to_link(ctx, gch_copy, dest_link)
+                                ctx.move_hierarchy_to_link(gch_copy, dest_link)
 
                                 scale_tuple = None
                                 if self.mirror == 'x':
@@ -674,8 +791,9 @@ class GnEachLink(DslOp):
         if not self.assert_instance_op(ctx):
             return
 
-        links = ctx.get_matching_links(self.pattern)
-        for link in links:
+        links = ctx.get_matching_links(self.pattern)        
+        for pair in links:
+            link = pair[1]
             ctx.push_scope()
             ctx.set_current_link(link)
             for item in self.sequence:
@@ -848,19 +966,8 @@ class ScGenerate(Node, ScObjectOperatorNode):
 
                 # root of rule recursion
                 dsl_ctx = DslContext(rs, self.inputs["Prefix"].default_value, start_obj)
-                op_list = eval(file_text)
-                for op in op_list:
-                    op.prepare(dsl_ctx)
-
-                    if dsl_ctx.check_for_errors("Preparation"):
-                        break
-
-                    op.execute(dsl_ctx)
-
-                    if dsl_ctx.check_for_errors("Execution"):
-                        break
-
-                generated_objects = dsl_ctx.generated_objects
+                if dsl_ctx.evaluate_production(file_text):
+                    generated_objects = dsl_ctx.generated_objects
 
         self.prop_obj_array = repr(generated_objects)
         self.prop_random_state = repr(rs.get_state())
