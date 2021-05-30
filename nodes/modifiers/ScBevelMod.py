@@ -14,7 +14,8 @@ class ScBevelMod(Node, ScModifierNode):
     in_segments: IntProperty(name="Segments", default=1, min=0, max=100, update=ScNode.update_value)
     in_profile: FloatProperty(name="Profile", default=0.5, min=0.0, max=1.0, update=ScNode.update_value)
     in_material: IntProperty(name="Material", default=-1, min=0, max=32767, update=ScNode.update_value)
-    in_use_only_vertices: BoolProperty(name="Only Vertices", update=ScNode.update_value)
+    in_affect: EnumProperty(name="Affect", items=[("VERTICES", "Vertices", ""), ("EDGES", "Edges", "")],
+                            default="EDGES", update=ScNode.update_value)
     in_use_clamp_overlap: BoolProperty(name="Clamp Overlap", default=True, update=ScNode.update_value)
     in_loop_slide: BoolProperty(name="Loop Slide", default=True, update=ScNode.update_value)
     in_mark_seam: BoolProperty(name="Mark Seams", update=ScNode.update_value)
@@ -35,7 +36,7 @@ class ScBevelMod(Node, ScModifierNode):
         self.inputs.new("ScNodeSocketNumber", "Segments").init("in_segments", True)
         self.inputs.new("ScNodeSocketNumber", "Profile").init("in_profile", True)
         self.inputs.new("ScNodeSocketNumber", "Material").init("in_material")
-        self.inputs.new("ScNodeSocketBool", "Only Vertices").init("in_use_only_vertices", True)
+        self.inputs.new("ScNodeSocketString", "Affect").init("in_affect")
         self.inputs.new("ScNodeSocketBool", "Clamp Overlap").init("in_use_clamp_overlap")
         self.inputs.new("ScNodeSocketBool", "Loop Slide").init("in_loop_slide")
         self.inputs.new("ScNodeSocketBool", "Mark Seams").init("in_mark_seam")
@@ -77,8 +78,8 @@ class ScBevelMod(Node, ScModifierNode):
         bpy.context.object.modifiers[self.prop_mod_name].segments = int(self.inputs["Segments"].default_value)
         bpy.context.object.modifiers[self.prop_mod_name].profile = self.inputs["Profile"].default_value
         bpy.context.object.modifiers[self.prop_mod_name].material = int(self.inputs["Material"].default_value)
-        bpy.context.object.modifiers[self.prop_mod_name].use_only_vertices = self.inputs["Only Vertices"].default_value
         bpy.context.object.modifiers[self.prop_mod_name].use_clamp_overlap = self.inputs["Clamp Overlap"].default_value
+        bpy.context.object.modifiers[self.prop_mod_name].affect = self.inputs["Affect"].default_value
         bpy.context.object.modifiers[self.prop_mod_name].loop_slide = self.inputs["Loop Slide"].default_value
         bpy.context.object.modifiers[self.prop_mod_name].mark_seam = self.inputs["Mark Seams"].default_value
         bpy.context.object.modifiers[self.prop_mod_name].mark_sharp = self.inputs["Mark Sharp"].default_value
